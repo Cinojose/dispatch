@@ -20,9 +20,12 @@ from dispatch.feedback.incident.enums import FeedbackRating
 from dispatch.feedback.incident.models import FeedbackCreate
 from dispatch.feedback.service import service as feedback_service
 from dispatch.individual import service as individual_service
-from dispatch.feedback.service.models import ServiceFeedbackRating
+from dispatch.feedback.service.models import ServiceFeedbackRating, ServiceFeedbackCreate
 from dispatch.incident import service as incident_service
 from dispatch.participant import service as participant_service
+from dispatch.feedback.service.reminder import service as reminder_service
+from dispatch.plugin import service as plugin_service
+from dispatch.project import service as project_service
 from dispatch.plugins.dispatch_slack.bolt import app
 from dispatch.plugins.dispatch_slack.fields import static_select_block
 from dispatch.plugins.dispatch_slack.middleware import (
@@ -40,6 +43,10 @@ from .enums import (
     ServiceFeedbackNotificationActionIds,
     ServiceFeedbackNotificationActions,
     ServiceFeedbackNotificationBlockIds,
+)
+from dispatch.messaging.strings import (
+    ONCALL_SHIFT_FEEDBACK_RECEIVED,
+    MessageType,
 )
 
 log = logging.getLogger(__file__)
@@ -180,7 +187,7 @@ def handle_incident_feedback_submission_event(
     ack_incident_feedback_submission_event(ack=ack)
     incident = incident_service.get(db_session=db_session, incident_id=context["subject"].id)
 
-    feedback = form_data.get(IncidentFeedbackNotificationBlockIds.feedback_input)
+    feedback = form_data.get(IncidentFeedbackNotificationBlockIds.feedback_input, "")
     rating = form_data.get(IncidentFeedbackNotificationBlockIds.rating_select, {}).get("value")
 
     feedback_in = FeedbackCreate(
@@ -270,6 +277,7 @@ def oncall_shift_feedback_input(
             multiline=True,
             placeholder="How would you describe your experience?",
         ),
+        optional=True,
         label=label,
         **kwargs,
     )
@@ -368,21 +376,31 @@ def handle_oncall_shift_feedback_submission_event(
     db_session: Session,
     form_data: dict,
 ):
-    hours = form_data.get(ServiceFeedbackNotificationBlockIds.hours_input, {})
-    if not hours.isnumeric():
+    hours = form_data.get(ServiceFeedbackNotificationBlockIds.hours_input, "")
+    if not hours.replace(".", "", 1).isdigit():
         ack_with_error(ack=ack)
         return
 
     ack_oncall_shift_feedback_submission_event(ack=ack)
 
-    feedback = form_data.get(ServiceFeedbackNotificationBlockIds.feedback_input)
+    feedback = form_data.get(ServiceFeedbackNotificationBlockIds.feedback_input, "")
     rating = form_data.get(ServiceFeedbackNotificationBlockIds.rating_select, {}).get("value")
 
-    # metadata is organization_slug|project_id|schedule_id|shift_end_at
+    # metadata is organization_slug|project_id|schedule_id|shift_end_at|reminder_id
     metadata = body["view"]["private_metadata"].split("|")
     project_id = metadata[1]
     schedule_id = metadata[2]
-    shift_end_at = datetime.strptime(metadata[3], "%Y-%m-%dT%H:%M:%SZ")
+    shift_end_raw = metadata[3]
+    shift_end_at = (
+        datetime.strptime(shift_end_raw, "%Y-%m-%dT%H:%M:%SZ")
+        if "T" in shift_end_raw
+        else datetime.strptime(shift_end_raw, "%Y-%m-%d %H:%M:%S")
+    )
+    # if there's a reminder id, delete the reminder
+    if len(metadata) > 4:
+        reminder_id = metadata[4]
+        if reminder_id.isnumeric():
+            reminder_service.delete(db_session=db_session, reminder_id=reminder_id)
 
     individual = (
         None
@@ -392,7 +410,9 @@ def handle_oncall_shift_feedback_submission_event(
         )
     )
 
-    service_feedback = feedback_service.ServiceFeedbackCreate(
+    project = project_service.get(db_session=db_session, project_id=project_id)
+
+    service_feedback = ServiceFeedbackCreate(
         feedback=feedback,
         hours=hours,
         individual=individual,
@@ -400,6 +420,7 @@ def handle_oncall_shift_feedback_submission_event(
         schedule=schedule_id,
         shift_end_at=shift_end_at,
         shift_start_at=None,
+        project=project,
     )
 
     service_feedback = feedback_service.create(
@@ -416,3 +437,26 @@ def handle_oncall_shift_feedback_submission_event(
         view_id=body["view"]["id"],
         view=modal,
     )
+
+    plugin = plugin_service.get_active_instance(
+        db_session=db_session, project_id=project_id, plugin_type="conversation"
+    )
+
+    if plugin:
+        notification_text = "Oncall Shift Feedback Received"
+        notification_template = ONCALL_SHIFT_FEEDBACK_RECEIVED
+        items = [
+            {
+                "shift_end_at": shift_end_at,
+            }
+        ]
+        try:
+            plugin.instance.send_direct(
+                user.email,
+                notification_text,
+                notification_template,
+                MessageType.service_feedback,
+                items=items,
+            )
+        except Exception as e:
+            log.exception(e)

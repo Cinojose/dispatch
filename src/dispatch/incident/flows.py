@@ -10,7 +10,7 @@ from dispatch.database.core import resolve_attr
 from dispatch.decorators import background_task
 from dispatch.document import flows as document_flows
 from dispatch.enums import DocumentResourceTypes
-from dispatch.enums import Visibility
+from dispatch.enums import Visibility, EventType
 from dispatch.event import service as event_service
 from dispatch.group import flows as group_flows
 from dispatch.group.enums import GroupType, GroupAction
@@ -77,6 +77,7 @@ def get_incident_participants(
                 source=plugin.plugin.title,
                 description="Incident participants resolved",
                 incident_id=incident.id,
+                type=EventType.participant_updated,
             )
         else:
             event_service.log_incident_event(
@@ -84,6 +85,7 @@ def get_incident_participants(
                 source="Dispatch Core App",
                 description="Incident participants not resolved",
                 incident_id=incident.id,
+                type=EventType.participant_updated,
             )
             log.warning("Incident participants not resolved. No participant plugin enabled.")
 
@@ -104,6 +106,7 @@ def reactivate_incident_participants(incident: Incident, db_session: Session):
                 source="Dispatch Core App",
                 description=f"Unable to reactivate participant with email {participant.individual.email}",
                 incident_id=incident.id,
+                type=EventType.participant_updated,
             )
             log.exception(e)
 
@@ -112,6 +115,7 @@ def reactivate_incident_participants(incident: Incident, db_session: Session):
         source="Dispatch Core App",
         description="Incident participants reactivated",
         incident_id=incident.id,
+        type=EventType.participant_updated,
     )
 
 
@@ -129,6 +133,7 @@ def inactivate_incident_participants(incident: Incident, db_session: Session):
                 source="Dispatch Core App",
                 description=f"Unable to inactivate participant with email {participant.individual.email}",
                 incident_id=incident.id,
+                type=EventType.participant_updated,
             )
             log.exception(e)
 
@@ -137,71 +142,78 @@ def inactivate_incident_participants(incident: Incident, db_session: Session):
         source="Dispatch Core App",
         description="Incident participants inactivated",
         incident_id=incident.id,
+        type=EventType.participant_updated,
     )
 
 
-@background_task
-def incident_create_flow(*, organization_slug: str, incident_id: int, db_session=None) -> Incident:
-    """Creates all resources required for new incidents."""
-    # we get the incident
-    incident = incident_service.get(db_session=db_session, incident_id=incident_id)
-
+def incident_create_resources(*, incident: Incident, db_session=None) -> Incident:
+    """Creates all resources required for incidents."""
     # we create the incident ticket
-    ticket_flows.create_incident_ticket(incident=incident, db_session=db_session)
+    if not incident.ticket:
+        ticket_flows.create_incident_ticket(incident=incident, db_session=db_session)
 
     # we resolve individual and team participants
     individual_participants, team_participants = get_incident_participants(incident, db_session)
+    tactical_participant_emails = [i.email for i, _ in individual_participants]
 
     # we create the tactical group
-    tactical_participant_emails = [i.email for i, _ in individual_participants]
-    tactical_group = group_flows.create_group(
-        subject=incident,
-        group_type=GroupType.tactical,
-        group_participants=tactical_participant_emails,
-        db_session=db_session,
-    )
+    if not incident.tactical_group:
+        group_flows.create_group(
+            subject=incident,
+            group_type=GroupType.tactical,
+            group_participants=tactical_participant_emails,
+            db_session=db_session,
+        )
 
     # we create the notifications group
-    notification_participant_emails = [t.email for t in team_participants]
-    notifications_group = group_flows.create_group(
-        subject=incident,
-        group_type=GroupType.notifications,
-        group_participants=notification_participant_emails,
-        db_session=db_session,
-    )
+    if not incident.notifications_group:
+        notification_participant_emails = [t.email for t in team_participants]
+        group_flows.create_group(
+            subject=incident,
+            group_type=GroupType.notifications,
+            group_participants=notification_participant_emails,
+            db_session=db_session,
+        )
 
     # we create the storage folder
-    storage_members = []
-    if tactical_group and notifications_group:
-        storage_members = [tactical_group.email, notifications_group.email]
-    else:
-        storage_members = tactical_participant_emails
+    if not incident.storage:
+        storage_members = []
+        if incident.tactical_group and incident.notifications_group:
+            storage_members = [incident.tactical_group.email, incident.notifications_group.email]
+        else:
+            storage_members = tactical_participant_emails
 
-    storage_flows.create_storage(
-        subject=incident, storage_members=storage_members, db_session=db_session
-    )
+        storage_flows.create_storage(
+            subject=incident, storage_members=storage_members, db_session=db_session
+        )
 
     # we create the incident document
-    document_flows.create_document(
-        subject=incident,
-        document_type=DocumentResourceTypes.incident,
-        document_template=incident.incident_type.incident_template_document,
-        db_session=db_session,
-    )
+    if not incident.incident_document:
+        document_flows.create_document(
+            subject=incident,
+            document_type=DocumentResourceTypes.incident,
+            document_template=incident.incident_type.incident_template_document,
+            db_session=db_session,
+        )
 
     # we create the conference room
-    conference_participants = []
-    if tactical_group and notifications_group:
-        conference_participants = [tactical_group.email, notifications_group.email]
-    else:
-        conference_participants = tactical_participant_emails
+    if not incident.conference:
+        conference_participants = []
+        if incident.tactical_group and incident.notifications_group:
+            conference_participants = [
+                incident.tactical_group.email,
+                incident.notifications_group.email,
+            ]
+        else:
+            conference_participants = tactical_participant_emails
 
-    conference_flows.create_conference(
-        incident=incident, participants=conference_participants, db_session=db_session
-    )
+        conference_flows.create_conference(
+            incident=incident, participants=conference_participants, db_session=db_session
+        )
 
     # we create the conversation
-    conversation_flows.create_conversation(incident=incident, db_session=db_session)
+    if not incident.conversation:
+        conversation_flows.create_incident_conversation(incident=incident, db_session=db_session)
 
     # we update the incident ticket
     ticket_flows.update_incident_ticket(incident_id=incident.id, db_session=db_session)
@@ -238,7 +250,7 @@ def incident_create_flow(*, organization_slug: str, incident_id: int, db_session
         )
 
         # we add the participant to the conversation
-        conversation_flows.add_participants(
+        conversation_flows.add_incident_participants(
             incident=incident, participant_emails=[user_email], db_session=db_session
         )
 
@@ -270,16 +282,34 @@ def incident_create_flow(*, organization_slug: str, incident_id: int, db_session
         source="Dispatch Core App",
         description="Incident participants added to incident",
         incident_id=incident.id,
+        type=EventType.participant_updated,
     )
+
+    return incident
+
+
+@background_task
+def incident_create_resources_flow(
+    *, organization_slug: str, incident_id: int, db_session=None
+) -> Incident:
+    """Creates all resources required for an existing incident."""
+    # we get the incident
+    incident = incident_service.get(db_session=db_session, incident_id=incident_id)
+
+    # we create the incident resources
+    return incident_create_resources(incident=incident, db_session=db_session)
+
+
+@background_task
+def incident_create_flow(*, organization_slug: str, incident_id: int, db_session=None) -> Incident:
+    """Creates all resources required for new incidents and initiates incident response workflow."""
+    # we get the incident
+    incident = incident_service.get(db_session=db_session, incident_id=incident_id)
+
+    # we create the incident resources
+    incident_create_resources(incident=incident, db_session=db_session)
 
     send_incident_created_notifications(incident, db_session)
-
-    event_service.log_incident_event(
-        db_session=db_session,
-        source="Dispatch Core App",
-        description="Incident notifications sent",
-        incident_id=incident.id,
-    )
 
     # we page the incident commander based on incident priority
     if incident.incident_priority.page_commander:
@@ -458,6 +488,8 @@ def conversation_topic_dispatcher(
             description=f'{individual.name} changed the incident title to "{incident.title}"',
             incident_id=incident.id,
             individual_id=individual.id,
+            type=EventType.field_updated,
+            owner=individual.name,
         )
 
     if previous_incident.description != incident.description:
@@ -468,6 +500,8 @@ def conversation_topic_dispatcher(
             details={"description": incident.description},
             incident_id=incident.id,
             individual_id=individual.id,
+            type=EventType.field_updated,
+            owner=individual.name,
         )
 
     description, details = check_for_tag_change(
@@ -481,6 +515,8 @@ def conversation_topic_dispatcher(
             details=details,
             incident_id=incident.id,
             individual_id=individual.id,
+            type=EventType.field_updated,
+            owner=individual.name,
         )
 
     if previous_incident.incident_type.name != incident.incident_type.name:
@@ -492,6 +528,8 @@ def conversation_topic_dispatcher(
             description=f"{individual.name} changed the incident type to {incident.incident_type.name}",
             incident_id=incident.id,
             individual_id=individual.id,
+            type=EventType.field_updated,
+            owner=individual.name,
         )
 
     if previous_incident.incident_severity.name != incident.incident_severity.name:
@@ -503,6 +541,8 @@ def conversation_topic_dispatcher(
             description=f"{individual.name} changed the incident severity to {incident.incident_severity.name}",
             incident_id=incident.id,
             individual_id=individual.id,
+            type=EventType.assessment_updated,
+            owner=individual.name,
         )
 
     if previous_incident.incident_priority.name != incident.incident_priority.name:
@@ -514,6 +554,8 @@ def conversation_topic_dispatcher(
             description=f"{individual.name} changed the incident priority to {incident.incident_priority.name}",
             incident_id=incident.id,
             individual_id=individual.id,
+            type=EventType.assessment_updated,
+            owner=individual.name,
         )
 
     if previous_incident.status != incident.status:
@@ -525,6 +567,8 @@ def conversation_topic_dispatcher(
             description=f"{individual.name} marked the incident as {incident.status.lower()}",
             incident_id=incident.id,
             individual_id=individual.id,
+            type=EventType.assessment_updated,
+            owner=individual.name,
         )
 
     if conversation_topic_change:
@@ -574,6 +618,7 @@ def status_flow_dispatcher(
             source="Dispatch Core App",
             description=f"The incident status has been changed from {previous_status.lower()} to {current_status.lower()}",  # noqa
             incident_id=incident.id,
+            type=EventType.assessment_updated,
         )
 
 
@@ -902,7 +947,7 @@ def incident_add_or_reactivate_participant_flow(
 
     if incident.status != IncidentStatus.closed:
         # we add the participant to the conversation
-        conversation_flows.add_participants(
+        conversation_flows.add_incident_participants(
             incident=incident, participant_emails=[user_email], db_session=db_session
         )
 
@@ -942,7 +987,7 @@ def incident_remove_participant_flow(
             for assignee in task.assignees:
                 if assignee == participant:
                     # we add the participant to the conversation
-                    conversation_flows.add_participants(
+                    conversation_flows.add_incident_participants(
                         incident=incident, participant_emails=[user_email], db_session=db_session
                     )
 
@@ -954,7 +999,7 @@ def incident_remove_participant_flow(
 
     if user_email == incident.commander.individual.email:
         # we add the participant to the conversation
-        conversation_flows.add_participants(
+        conversation_flows.add_incident_participants(
             incident=incident, participant_emails=[user_email], db_session=db_session
         )
 

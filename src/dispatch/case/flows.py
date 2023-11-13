@@ -6,8 +6,7 @@ from sqlalchemy.orm import Session
 
 from dispatch.case import service as case_service
 from dispatch.case.models import CaseRead
-from dispatch.conversation import service as conversation_service
-from dispatch.conversation.models import ConversationCreate
+from dispatch.conversation import flows as conversation_flows
 from dispatch.database.core import SessionLocal
 from dispatch.decorators import background_task
 from dispatch.document import flows as document_flows
@@ -154,26 +153,6 @@ def case_add_or_reactivate_participant_flow(
     return participant
 
 
-def create_conversation(case: Case, conversation_target: str, db_session: SessionLocal):
-    """Create external communication conversation."""
-    plugin = plugin_service.get_active_instance(
-        db_session=db_session, project_id=case.project.id, plugin_type="conversation"
-    )
-    conversation = plugin.instance.create_threaded(
-        case=case, conversation_id=conversation_target, db_session=db_session
-    )
-    conversation.update({"resource_type": plugin.plugin.slug, "resource_id": conversation["id"]})
-
-    event_service.log_case_event(
-        db_session=db_session,
-        source=plugin.plugin.title,
-        description="Case conversation created",
-        case_id=case.id,
-    )
-
-    return conversation
-
-
 def update_conversation(case: Case, db_session: SessionLocal):
     """Updates external communication conversation."""
     plugin = plugin_service.get_active_instance(
@@ -198,7 +177,7 @@ def case_new_create_flow(
     conversation_target: str = None,
     service_id: int = None,
     db_session: Session,
-    create_resources: bool = True,
+    create_all_resources: bool = True,
 ):
     """Runs the case new creation flow."""
     # we get the case
@@ -207,17 +186,24 @@ def case_new_create_flow(
     # we create the ticket
     ticket_flows.create_case_ticket(case=case, db_session=db_session)
 
+    # we resolve participants
     individual_participants, team_participants = get_case_participants(
         case=case, db_session=db_session
     )
 
-    if create_resources:
-        case_create_resources_flow(
-            db_session=db_session,
-            case_id=case.id,
-            individual_participants=individual_participants,
-            team_participants=team_participants,
-        )
+    # NOTE: we create all external resources for a Case unless it's
+    # created from a Signal, as it gets expensive when we have lots of them.
+    case_create_resources_flow(
+        db_session=db_session,
+        case_id=case.id,
+        individual_participants=individual_participants,
+        team_participants=team_participants,
+        conversation_target=conversation_target,
+        create_all_resources=create_all_resources,
+    )
+
+    db_session.add(case)
+    db_session.commit()
 
     if case.case_priority.page_assignee:
         if not service_id:
@@ -227,83 +213,21 @@ def case_new_create_flow(
                 log.warning(
                     "Case assignee not paged. No relationship between case type and an oncall service."
                 )
-        else:
-            oncall_plugin = plugin_service.get_active_instance(
-                db_session=db_session, project_id=case.project.id, plugin_type="oncall"
+                return case
+
+        oncall_plugin = plugin_service.get_active_instance(
+            db_session=db_session, project_id=case.project.id, plugin_type="oncall"
+        )
+        if oncall_plugin:
+            oncall_plugin.instance.page(
+                service_id=service_id,
+                incident_name=case.name,
+                incident_title=case.title,
+                incident_description=case.description,
             )
-            if oncall_plugin:
-                oncall_plugin.instance.page(
-                    service_id=service_id,
-                    incident_name=case.name,
-                    incident_title=case.title,
-                    incident_description=case.description,
-                )
-            else:
-                log.warning("Case assignee not paged. No plugin of type oncall enabled.")
-
-    conversation_plugin = plugin_service.get_active_instance(
-        db_session=db_session, project_id=case.project.id, plugin_type="conversation"
-    )
-    if conversation_plugin:
-        if not conversation_target:
-            conversation_target = case.case_type.conversation_target
-        if conversation_target:
-            try:
-                # TODO: Refactor conversation creation using conversation_flows module
-                conversation = create_conversation(case, conversation_target, db_session)
-                conversation_in = ConversationCreate(
-                    resource_id=conversation["resource_id"],
-                    resource_type=conversation["resource_type"],
-                    weblink=conversation["weblink"],
-                    thread_id=conversation["timestamp"],
-                    channel_id=conversation["id"],
-                )
-                case.conversation = conversation_service.create(
-                    db_session=db_session, conversation_in=conversation_in
-                )
-
-                event_service.log_case_event(
-                    db_session=db_session,
-                    source="Dispatch Core App",
-                    description="Conversation added to case",
-                    case_id=case.id,
-                )
-                # wait until all resources are created before adding suggested participants
-                individual_participants = [x.email for x, _ in individual_participants]
-
-                for email in individual_participants:
-                    # we don't rely on on this flow to add folks to the conversation because in this case
-                    # we want to do it in bulk
-                    case_add_or_reactivate_participant_flow(
-                        db_session=db_session,
-                        user_email=email,
-                        case_id=case.id,
-                        add_to_conversation=False,
-                    )
-                # explicitly add the assignee to the conversation
-                all_participants = individual_participants + [case.assignee.individual.email]
-                conversation_plugin.instance.add_to_thread(
-                    case.conversation.channel_id,
-                    case.conversation.thread_id,
-                    all_participants,
-                )
-                event_service.log_case_event(
-                    db_session=db_session,
-                    source="Dispatch Core App",
-                    description="Case participants added to conversation.",
-                    case_id=case.id,
-                )
-            except Exception as e:
-                event_service.log_case_event(
-                    db_session=db_session,
-                    source="Dispatch Core App",
-                    description=f"Creation of case conversation failed. Reason: {e}",
-                    case_id=case.id,
-                )
-                log.exception(e)
-
-    db_session.add(case)
-    db_session.commit()
+        else:
+            log.warning("Case assignee not paged. No plugin of type oncall enabled.")
+            return case
 
     return case
 
@@ -422,8 +346,9 @@ def case_update_flow(
                 db_session=db_session,
             )
 
-    # we send the case updated notification
-    update_conversation(case, db_session)
+    if case.conversation:
+        # we send the case updated notification
+        update_conversation(case, db_session)
 
 
 def case_delete_flow(case: Case, db_session: SessionLocal):
@@ -684,7 +609,12 @@ def case_assign_role_flow(
 
 
 def case_create_resources_flow(
-    db_session: Session, case_id: int, individual_participants: list, team_participants: list
+    db_session: Session,
+    case_id: int,
+    individual_participants: List[str],
+    team_participants: List[str],
+    conversation_target: str = None,
+    create_all_resources: bool = True,
 ) -> None:
     """Runs the case resource creation flow."""
     case = get(db_session=db_session, case_id=case_id)
@@ -692,43 +622,93 @@ def case_create_resources_flow(
     if case.assignee:
         individual_participants.append((case.assignee.individual, None))
 
-    # we create the tactical group
-    direct_participant_emails = [i.email for i, _ in individual_participants]
+    if create_all_resources:
+        # we create the tactical group
+        direct_participant_emails = [i.email for i, _ in individual_participants]
 
-    indirect_participant_emails = [t.email for t in team_participants]
+        indirect_participant_emails = [t.email for t in team_participants]
 
-    group = group_flows.create_group(
-        subject=case,
-        group_type=GroupType.tactical,
-        group_participants=list(set(direct_participant_emails + indirect_participant_emails)),
-        db_session=db_session,
-    )
+        if not case.groups:
+            group_flows.create_group(
+                subject=case,
+                group_type=GroupType.tactical,
+                group_participants=list(
+                    set(direct_participant_emails + indirect_participant_emails)
+                ),
+                db_session=db_session,
+            )
 
-    # we create the storage folder
-    storage_members = []
-    if group:
-        storage_members = [group.email]
+        # we create the storage folder
+        storage_members = []
+        if case.tactical_group:
+            storage_members = [case.tactical_group.email]
+        # direct add members if not group exists
+        else:
+            storage_members = direct_participant_emails
 
-    # direct add members if not group exists
-    else:
-        storage_members = direct_participant_emails
+        if not case.storage:
+            storage_flows.create_storage(
+                subject=case, storage_members=storage_members, db_session=db_session
+            )
 
-    case.storage = storage_flows.create_storage(
-        subject=case, storage_members=storage_members, db_session=db_session
-    )
+        # we create the investigation document
+        if not case.case_document:
+            document_flows.create_document(
+                subject=case,
+                document_type=DocumentResourceTypes.case,
+                document_template=case.case_type.case_template_document,
+                db_session=db_session,
+            )
 
-    # we create the investigation document
-    document = document_flows.create_document(
-        subject=case,
-        document_type=DocumentResourceTypes.case,
-        document_template=case.case_type.case_template_document,
-        db_session=db_session,
-    )
+        # we update the case document
+        document_flows.update_document(
+            document=case.case_document, project_id=case.project.id, db_session=db_session
+        )
+
+    try:
+        # we create the conversation and add participants to the thread
+        conversation_flows.create_case_conversation(case, conversation_target, db_session)
+
+        event_service.log_case_event(
+            db_session=db_session,
+            source="Dispatch Core App",
+            description="Conversation added to case",
+            case_id=case.id,
+        )
+        # wait until all resources are created before adding suggested participants
+        individual_participants = [x.email for x, _ in individual_participants]
+
+        for email in individual_participants:
+            # we don't rely on on this flow to add folks to the conversation because in this case
+            # we want to do it in bulk
+            case_add_or_reactivate_participant_flow(
+                db_session=db_session,
+                user_email=email,
+                case_id=case.id,
+                add_to_conversation=False,
+            )
+        # explicitly add the assignee to the conversation
+        all_participants = individual_participants + [case.assignee.individual.email]
+
+        # # we add the participant to the conversation
+        conversation_flows.add_case_participants(
+            case=case, participant_emails=all_participants, db_session=db_session
+        )
+
+        event_service.log_case_event(
+            db_session=db_session,
+            source="Dispatch Core App",
+            description="Case participants added to conversation.",
+            case_id=case.id,
+        )
+    except Exception as e:
+        event_service.log_case_event(
+            db_session=db_session,
+            source="Dispatch Core App",
+            description=f"Creation of case conversation failed. Reason: {e}",
+            case_id=case.id,
+        )
+        log.exception(e)
 
     # we update the ticket
     ticket_flows.update_case_ticket(case=case, db_session=db_session)
-
-    # we update the case document
-    document_flows.update_document(
-        document=document, project_id=case.project.id, db_session=db_session
-    )

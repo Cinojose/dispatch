@@ -27,14 +27,9 @@ if (registrationEnabled) {
 
 export const publicRoute = [
   {
-    path: "*",
-    meta: { title: "Dispatch" },
-    component: () => import("@/views/error/NotFound.vue"),
-  },
-  {
     path: "/:organization/auth/",
     component: BasicLayout,
-    meta: { title: "Auth", icon: "view_compact", group: "auth" },
+    meta: { title: "Auth", icon: "mdi-view-comfy-outline", group: "auth" },
     children: authPages,
   },
   {
@@ -54,9 +49,14 @@ export const publicRoute = [
     name: "PKCEImplicityCallback",
     meta: { requiresAuth: true },
   },
+  {
+    path: "/:pathMatch(.*)*",
+    meta: { title: "Dispatch" },
+    component: () => import("@/views/error/NotFound.vue"),
+  },
 ]
 
-// NOTE: The order in which routes are added to the list matters when evaluated. For example, /incidents/report will take precendence over /incidents/:name.
+// NOTE: The order in which routes are added to the list matters when evaluated. For example, /incidents/report will take precedence over /incidents/:name.
 export const protectedRoute = [
   {
     path: "/",
@@ -157,6 +157,16 @@ export const protectedRoute = [
               props: true,
               meta: {
                 showEditSheet: true,
+              },
+            },
+            {
+              path: "/:organization/incidents/:name/timeline",
+              name: "IncidentTableEditTimeline",
+              component: () => import("@/incident/EditSheet.vue"),
+              props: true,
+              meta: {
+                showEditSheet: true,
+                showTimeline: true,
               },
             },
           ],
@@ -276,7 +286,7 @@ export const protectedRoute = [
       path: "feedback",
       component: DefaultLayout,
       name: "feedback",
-      redirect: { name: "FeedbackTable" },
+      redirect: { name: "IncidentFeedbackTable" },
       meta: {
         title: "Feedback",
         icon: "mdi-message-alert",
@@ -286,10 +296,16 @@ export const protectedRoute = [
       },
       children: [
         {
-          path: "/:organization/feedback",
-          name: "FeedbackTable",
-          meta: { title: "Feedback" },
-          component: () => import("@/feedback/Table.vue"),
+          path: "/:organization/feedback/incident",
+          name: "IncidentFeedbackTable",
+          meta: { title: "Incident feedback", group: "feedback" },
+          component: () => import("@/feedback/incident/Table.vue"),
+        },
+        {
+          path: "/:organization/feedback/service",
+          name: "ServiceFeedbackTable",
+          meta: { title: "Oncall feedback", group: "feedback" },
+          component: () => import("@/feedback/service/Table.vue"),
         },
       ],
     },
@@ -515,7 +531,7 @@ export const protectedRoute = [
       component: DefaultLayout,
       meta: {
         title: "Search",
-        icon: "view_compact",
+        icon: "mdi-view-comfy-outline",
         group: "search",
         noMenu: true,
         requiresAuth: true,

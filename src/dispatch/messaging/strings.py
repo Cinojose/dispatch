@@ -5,6 +5,7 @@ from typing import List
 from dispatch.messaging.email.filters import env
 from dispatch.conversation.enums import ConversationButtonActions
 from dispatch.incident.enums import IncidentStatus
+from dispatch.case.enums import CaseStatus
 from dispatch.enums import Visibility
 
 from dispatch import config
@@ -34,6 +35,7 @@ class MessageType(DispatchEnum):
     incident_tactical_report = "incident-tactical-report"
     incident_task_list = "incident-task-list"
     incident_task_reminder = "incident-task-reminder"
+    case_status_reminder = "case-status-reminder"
     service_feedback = "service-feedback"
 
 
@@ -41,6 +43,13 @@ INCIDENT_STATUS_DESCRIPTIONS = {
     IncidentStatus.active: "This incident is under active investigation.",
     IncidentStatus.stable: "This incident is stable, the bulk of the investigation has been completed or most of the risk has been mitigated.",
     IncidentStatus.closed: "This no longer requires additional involvement, long term incident action items have been assigned to their respective owners.",
+}
+
+CASE_STATUS_DESCRIPTIONS = {
+    CaseStatus.new: "This case is new and needs triaging.",
+    CaseStatus.triage: "This case is being triaged.",
+    CaseStatus.escalated: "This case has been escalated.",
+    CaseStatus.closed: "This case has been closed.",
 }
 
 INCIDENT_VISIBILITY_DESCRIPTIONS = {
@@ -236,6 +245,16 @@ You can use `{{command}}` in the conversation to close the incident if it has be
     "\n", " "
 ).strip()
 
+CASE_TRIAGE_REMINDER_DESCRIPTION = """The status of this case hasn't been updated recently.
+Please ensure you triage the case based on its priority.""".replace(
+    "\n", " "
+).strip()
+
+CASE_CLOSE_REMINDER_DESCRIPTION = """The status of this case hasn't been updated recently.
+You can use the case 'Resolve' button if it has been resolved and can be closed.""".replace(
+    "\n", " "
+).strip()
+
 INCIDENT_TASK_NEW_DESCRIPTION = """
 The following incident task has been created and assigned to you by {{task_creator}}: {{task_description}}"""
 
@@ -321,7 +340,10 @@ To find a Slack command, simply type `/` in the message field or click the light
 """
 
 ONCALL_SHIFT_FEEDBACK_DESCRIPTION = """
-Hi {{ individual_name }}, it appears that your {{ oncall_service_name }} shift has completed. To help us understand the impact on our responders, we would appreciate your feedback."""
+Hi {{ individual_name }}, it appears that your {{ oncall_service_name }} shift recently completed on {{ shift_end_at }} UTC. To help us understand the impact on our responders, we would appreciate your feedback."""
+
+ONCALL_SHIFT_FEEDBACK_RECEIVED_DESCRIPTION = """
+We received your feedback for your shift that ended {{ shift_end_at }} UTC. Thank you!"""
 
 INCIDENT_STATUS_CHANGE_DESCRIPTION = """
 The incident status has been changed from {{ incident_status_old }} to {{ incident_status_new }}.""".replace(
@@ -386,6 +408,14 @@ INCIDENT_NAME = {
 }
 
 INCIDENT_TITLE = {"title": "Title", "text": "{{title}}"}
+
+CASE_TITLE = {"title": "Title", "text": "{{title}}"}
+
+CASE_STATUS = {
+    "title": "Status - {{status}}",
+    "status_mapping": CASE_STATUS_DESCRIPTIONS,
+}
+
 
 if config.DISPATCH_MARKDOWN_IN_INCIDENT_DESC:
     INCIDENT_DESCRIPTION = {"title": "Description", "text": "{{description | markdown}}"}
@@ -593,6 +623,28 @@ INCIDENT_CLOSE_REMINDER = [
     INCIDENT_STATUS,
 ]
 
+
+CASE_CLOSE_REMINDER = [
+    {
+        "title": "{{name}} Case - Close Reminder",
+        "title_link": "{{dispatch_ui_case_url}}",
+        "text": CASE_CLOSE_REMINDER_DESCRIPTION,
+    },
+    CASE_TITLE,
+    CASE_STATUS,
+]
+
+CASE_TRIAGE_REMINDER = [
+    {
+        "title": "{{name}} Case - Triage Reminder",
+        "title_link": "{{dispatch_ui_case_url}}",
+        "text": CASE_TRIAGE_REMINDER_DESCRIPTION,
+    },
+    CASE_TITLE,
+    CASE_STATUS,
+]
+
+
 INCIDENT_TASK_REMINDER = [
     {"title": "Incident - {{ name }}", "text": "{{ title }}"},
     {"title": "Creator", "text": "{{ creator }}"},
@@ -763,17 +815,34 @@ INCIDENT_OPEN_TASKS = [
     }
 ]
 
+ONCALL_SHIFT_FEEDBACK_BUTTONS = [
+    {
+        "button_text": "Provide Feedback",
+        "button_value": "{{organization_slug}}|{{project_id}}|{{oncall_schedule_id}}|{{shift_end_at}}|{{reminder_id}}",
+        "button_action": ConversationButtonActions.service_feedback,
+    }
+]
+
 ONCALL_SHIFT_FEEDBACK_NOTIFICATION = [
     {
         "title": "Oncall Shift Feedback",
         "text": ONCALL_SHIFT_FEEDBACK_DESCRIPTION,
-        "buttons": [
-            {
-                "button_text": "Provide Feedback",
-                "button_value": "{{organization_slug}}|{{project_id}}|{{oncall_schedule_id}}|{{shift_end_at}}",
-                "button_action": ConversationButtonActions.service_feedback,
-            }
-        ],
+        "buttons": ONCALL_SHIFT_FEEDBACK_BUTTONS,
+    }
+]
+
+ONCALL_SHIFT_FEEDBACK_NOTIFICATION_REMINDER = [
+    {
+        "title": "Oncall Shift Feedback - REMINDER",
+        "text": ONCALL_SHIFT_FEEDBACK_DESCRIPTION,
+        "buttons": ONCALL_SHIFT_FEEDBACK_BUTTONS,
+    }
+]
+
+ONCALL_SHIFT_FEEDBACK_RECEIVED = [
+    {
+        "title": "Oncall Shift Feedback - RECEIVED",
+        "text": ONCALL_SHIFT_FEEDBACK_RECEIVED_DESCRIPTION,
     }
 ]
 

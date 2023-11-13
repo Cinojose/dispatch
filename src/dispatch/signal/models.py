@@ -4,12 +4,12 @@ from typing import List, Optional, Any
 
 from pydantic import Field
 from sqlalchemy import (
-    JSON,
     Boolean,
     Column,
     DateTime,
     ForeignKey,
     Integer,
+    JSON,
     PrimaryKeyConstraint,
     String,
     Table,
@@ -231,12 +231,13 @@ class SignalInstance(Base, TimeStampMixin, ProjectMixin):
     case_priority = relationship("CasePriority", backref="signal_instances")
     fingerprint = Column(String)
     filter_action = Column(String)
+    canary = Column(Boolean, default=False)
     raw = Column(JSONB)
     signal = relationship("Signal", backref="instances")
     signal_id = Column(Integer, ForeignKey("signal.id"))
 
 
-# Pydantic models...
+# Pydantic models
 class Service(DispatchBase):
     id: PrimaryKey
     description: Optional[str] = Field(None, nullable=True)
@@ -362,10 +363,12 @@ class AdditionalMetadata(DispatchBase):
 
 
 class SignalInstanceBase(DispatchBase):
-    project: ProjectRead
+    project: Optional[ProjectRead]
     case: Optional[CaseReadMinimal]
+    canary: Optional[bool] = False
     entities: Optional[List[EntityRead]] = []
     raw: dict[str, Any]
+    external_id: Optional[str]
     filter_action: SignalFilterAction = None
     created_at: Optional[datetime] = None
 

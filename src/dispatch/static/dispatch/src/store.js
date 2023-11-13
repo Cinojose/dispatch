@@ -1,6 +1,4 @@
-import Vue from "vue"
-import Vuex from "vuex"
-import { getField } from "vuex-map-fields"
+import { createStore } from "vuex"
 
 import app from "@/app/store"
 import auth from "@/auth/store"
@@ -12,7 +10,7 @@ import definition from "@/definition/store"
 import document from "@/document/store"
 import entity from "@/entity/store"
 import entity_type from "@/entity_type/store"
-import feedback from "@/feedback/store"
+import incident_feedback from "@/feedback/incident/store"
 import incident from "@/incident/store"
 import incident_cost_type from "@/incident_cost_type/store"
 import incident_priority from "@/incident/priority/store"
@@ -30,6 +28,7 @@ import reference from "@/document/reference/store"
 import runbook from "@/document/runbook/store"
 import search from "@/search/store"
 import service from "@/service/store"
+import service_feedback from "@/feedback/service/store"
 import signal from "@/signal/store"
 import signalEngagement from "@/signal/engagement/store"
 import signalFilter from "@/signal/filter/store"
@@ -47,9 +46,7 @@ import template from "@/document/template/store"
 import term from "@/term/store"
 import workflow from "@/workflow/store"
 
-Vue.use(Vuex)
-
-export default new Vuex.Store({
+export default createStore({
   modules: {
     app,
     auth,
@@ -61,7 +58,7 @@ export default new Vuex.Store({
     document,
     entity,
     entity_type,
-    feedback,
+    incident_feedback,
     incident,
     incident_cost_type,
     incident_priority,
@@ -76,15 +73,10 @@ export default new Vuex.Store({
     project,
     query,
     reference,
-    route: {
-      namespaced: true,
-      getters: {
-        getField,
-      },
-    },
     runbook,
     search,
     service,
+    service_feedback,
     source,
     sourceDataFormat,
     sourceEnvironment,

@@ -1032,7 +1032,7 @@ def handle_escalation_submission_event(
         case=case, organization_slug=context["subject"].organization_slug, db_session=db_session
     )
 
-    conversation_flows.add_participants(
+    conversation_flows.add_incident_participants(
         incident=incident, participant_emails=[user.email], db_session=db_session
     )
 
@@ -1082,7 +1082,7 @@ def join_incident_button_click(
     case = case_service.get(db_session=db_session, case_id=context["subject"].id)
 
     # we add the user to the incident conversation
-    conversation_flows.add_participants(
+    conversation_flows.add_incident_participants(
         # TODO: handle case where there are multiple related incidents
         incident=case.incidents[0],
         participant_emails=[user.email],
@@ -1156,16 +1156,21 @@ def handle_edit_submission_event(
     if form_data.get(DefaultBlockIds.case_type_select):
         case_type = {"name": form_data[DefaultBlockIds.case_type_select]["name"]}
 
+    assignee_email = None
     if form_data.get(DefaultBlockIds.case_assignee_select):
         assignee_email = client.users_info(
             user=form_data[DefaultBlockIds.case_assignee_select]["value"]
         )["user"]["profile"]["email"]
 
+    resolution_reason = None
+    if form_data.get(DefaultBlockIds.case_resolution_reason_select):
+        resolution_reason = form_data[DefaultBlockIds.case_resolution_reason_select]["value"]
+
     case_in = CaseUpdate(
         title=form_data[DefaultBlockIds.title_input],
         description=form_data[DefaultBlockIds.description_input],
         resolution=form_data[DefaultBlockIds.resolution_input],
-        resolution_reason=form_data[DefaultBlockIds.case_resolution_reason_select]["value"],
+        resolution_reason=resolution_reason,
         status=form_data[DefaultBlockIds.case_status_select]["name"],
         visibility=case.visibility,
         case_priority=case_priority,
@@ -1514,17 +1519,39 @@ def engagement_button_approve_click(
         ).build()
         return client.views_open(trigger_id=body["trigger_id"], view=modal)
 
+    engagement = signal_service.get_signal_engagement(
+        db_session=db_session,
+        signal_engagement_id=context["subject"].engagement_id,
+    )
+
+    mfa_plugin = plugin_service.get_active_instance(
+        db_session=db_session, project_id=context["subject"].project_id, plugin_type="auth-mfa"
+    )
+    mfa_enabled = True if mfa_plugin and engagement.require_mfa else False
+
+    blocks = [
+        Section(text="Confirm that this is expected and that it is not suspicious behavior."),
+        Divider(),
+        description_input(label="Additional Context", optional=False),
+    ]
+
+    if mfa_enabled:
+        blocks.append(Section(text=" "))
+        blocks.append(
+            Context(
+                elements=[
+                    "After submission, you will be asked to confirm a Multi-Factor Authentication (MFA) prompt, please have your MFA device ready."
+                ]
+            ),
+        )
+
     modal = Modal(
         submit="Submit",
         close="Cancel",
         title="Confirmation",
         callback_id=SignalEngagementActions.approve_submit,
         private_metadata=context["subject"].json(),
-        blocks=[
-            Section(text="Confirm that this is expected and that it is not suspicious behavior."),
-            Divider(),
-            description_input(label="Additional Context", optional=False),
-        ],
+        blocks=blocks,
     ).build()
     client.views_open(trigger_id=body["trigger_id"], view=modal)
 

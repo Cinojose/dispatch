@@ -90,6 +90,10 @@ def signal_instance_create_flow(
             )
         return signal_instance
 
+    # limited support for canary signals, just store the instance and return
+    if signal_instance.canary:
+        return signal_instance
+
     if not signal_instance.signal.create_case:
         return signal_instance
 
@@ -143,7 +147,7 @@ def signal_instance_create_flow(
         service_id=None,
         conversation_target=conversation_target,
         case_id=case.id,
-        create_resources=False,
+        create_all_resources=False,
     )
 
     if signal_instance.signal.engagements and entities:
